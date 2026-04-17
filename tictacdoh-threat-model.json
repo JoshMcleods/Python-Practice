@@ -1,257 +1,671 @@
-import os
-import json
-import sqlite3
-import hashlib
-import uuid
-import hmac
-import logging
-import secrets
-from datetime import datetime
-from enum import Enum
-import tkinter as tk
-from tkinter import messagebox, simpledialog
-
-# Setup basic logging for audit trails (Threat R1)
-logging.basicConfig(filename='tictacdoh.log', level=logging.INFO, 
-                    format='%(asctime)s - %(levelname)s - %(message)s')
-
-class GameState(Enum):
-    MENU = 1
-    LOGIN = 2
-    PLAYING = 3
-    GAME_OVER = 4
-
-class TicTacToe:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("TicTacDoh - Secure Edition")
-        self.root.geometry("400x500")
-        
-        self.db_path = "tictactoe.db"
-        self.savegame_folder = "savegames"
-        self.app_secret = b'7f3b89e2c1d5a4b6e8f9c0d1a2b3c4d5' # In production, load from env var
-        
-        self.current_user = None
-        self.session_token = None # Threat S1 mitigation
-        self.opponent = None
-        self.board = [' '
-] * 9
-        self.current_player = 'X'
-        self.game_state = GameState.MENU
-        self.game_id = None
-        self.buttons = []
-        
-        self._init_db()
-        self._init_savegame_folder()
-        self.show_main_menu()
-
-    def _init_db(self):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        # Added salt and failed_attempts columns (Threat I1, D1)
-        cursor.execute('''CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY,
-            username TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            salt TEXT NOT NULL,
-            failed_attempts INTEGER DEFAULT 0,
-            wins INTEGER DEFAULT 0,
-            losses INTEGER DEFAULT 0
-        )''')
-        cursor.execute('''CREATE TABLE IF NOT EXISTS games (
-            id TEXT PRIMARY KEY,
-            player_x TEXT NOT NULL,
-            player_o TEXT NOT NULL,
-            winner TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )''')
-        conn.commit()
-        conn.close()
-
-    def _hash_password(self, password, salt=None): """Secure PBKDF2 hashing with salt (Threat I1 mitigation)."""
-        if salt is None:
-            salt = secrets.token_hex(16)
-        # 100,
-000 iterations of SHA256 is the standard minimum
-        pwd_hash = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(),
-100000)
-        return pwd_hash.hex(), salt
-
-    def create_account(self, username, password):
-        # Input length validation (Threat D2)
-        if not (3 <= len(username) <= 20) or not (8 <= len(password) <= 64):
-            messagebox.showerror("Error",
-"Username (3-20) or Password (8-64) invalid length.")
-            return False
-
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        try:
-            pwd_hash, salt = self._hash_password(password)
-            cursor.execute('INSERT INTO users (username, password_hash, salt) VALUES (?, ?, ?)',
-                         (username, pwd_hash, salt))
-            conn.commit()
-            logging.info(f"Account created: {username}")
-            messagebox.showinfo("Success", f"Account '{username}' created!")
-            return True
-        except sqlite3.IntegrityError:
-            messagebox.showerror("Error",
-"Username exists.")
-            return False
-        finally:
-            conn.close()
-
-    def authenticate_user(self, username, password): """Authenticates with rate limiting and session tokens (Threat D1, S1)."""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('SELECT password_hash, salt, failed_attempts FROM users WHERE username = ?', (username,))
-        row = cursor.fetchone()
-        
-        if not row:
-            conn.close()
-            return None
-
-        stored_hash, salt, failed = row
-        
-        if failed >= 5: # Lockout after 5 attempts
-            messagebox.showerror("Locked",
-"Too many failed attempts.")
-            conn.close()
-            return None
-
-        new_hash, _ = self._hash_password(password, salt)
-        
-        if secrets.compare_digest(stored_hash, new_hash): # Constant-time comparison
-            cursor.execute('UPDATE users SET failed_attempts = 0 WHERE username = ?', (username,))
-            conn.commit()
-            conn.close()
-            logging.info(f"Login success: {username}")
-            return str(uuid.uuid4()) # Return session token
-        else:
-            cursor.execute('UPDATE users SET failed_attempts = failed_attempts + 1 WHERE username = ?', (username,))
-            conn.commit()
-            conn.close()
-            logging.warning(f"Login failed: {username}")
-            return None
-
-    def save_game(self): """Saves game with HMAC integrity protection (Threat T1/T3 mitigation)."""
-        self.game_id = self.game_id or str(uuid.uuid4())
-        save_data = {
-            'game_id': self.game_id,
-            'board': self.board,
-            'player_x': self.current_user,
-            'player_o': self.opponent,
-            'current_player': self.current_player
+{
+  "version": "2.0",
+  "summary": {
+    "title": "TicTacDoh Threat Model",
+    "owner": "",
+    "description": "STRIDE threat model for the TicTacDoh Tic Tac Toe application. Function-level data flow diagram for COMP3310 Assignment 1.",
+    "id": 0
+  },
+  "detail": {
+    "contributors": [],
+    "diagrams": [
+      {
+        "id": 0,
+        "title": "TicTacDoh — Function Level DFD",
+        "diagramType": "STRIDE",
+        "thumbnail": "",
+        "version": "2.0",
+        "description": "Data flows between key functional groups in tictactoe.py with trust boundaries and STRIDE threats identified.",
+        "cells": [
+          {
+            "type": "tm.BoundaryBox",
+            "position": { "x": 185, "y": 40 },
+            "size": { "width": 440, "height": 700 },
+            "angle": 0,
+            "id": "boundary-app",
+            "z": 0,
+            "attrs": {},
+            "data": {
+              "name": "Application logic boundary",
+              "description": "All application processes running within the Python tkinter application. Data here is in-memory and not persisted unless explicitly written out to disk."
+            }
+          },
+          {
+            "type": "tm.BoundaryBox",
+            "position": { "x": 645, "y": 165 },
+            "size": { "width": 225, "height": 400 },
+            "angle": 0,
+            "id": "boundary-fs",
+            "z": 0,
+            "attrs": {},
+            "data": {
+              "name": "File system trust boundary",
+              "description": "Data persisted to the local file system. No application-level access controls or encryption are applied. OS file permissions are the only protection."
+            }
+          },
+          {
+            "type": "tm.Actor",
+            "size": { "width": 112, "height": 60 },
+            "position": { "x": 30, "y": 80 },
+            "angle": 0,
+            "id": "actor-p1",
+            "z": 1,
+            "hasOpenThreats": false,
+            "attrs": {},
+            "data": {
+              "name": "Player 1",
+              "description": "The primary logged-in user who initiates login, starts games, saves and loads games, and views the scoreboard.",
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "threats": []
+            }
+          },
+          {
+            "type": "tm.Actor",
+            "size": { "width": 112, "height": 60 },
+            "position": { "x": 30, "y": 310 },
+            "angle": 0,
+            "id": "actor-p2",
+            "z": 1,
+            "hasOpenThreats": false,
+            "attrs": {},
+            "data": {
+              "name": "Player 2 (opponent)",
+              "description": "The second player whose credentials are entered by Player 1 on their behalf during game setup via show_opponent_dialog().",
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "threats": []
+            }
+          },
+          {
+            "type": "tm.Process",
+            "size": { "width": 150, "height": 100 },
+            "position": { "x": 220, "y": 65 },
+            "angle": 0,
+            "id": "proc-auth",
+            "z": 2,
+            "hasOpenThreats": true,
+            "attrs": {},
+            "data": {
+              "name": "Authentication (show_login, create_account, _hash_password, authenticate_user)",
+              "description": "Handles user account creation and login. Accepts username and password from GUI dialogs, hashes the password using MD5 with no salt, and checks credentials against the SQLite database.",
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": true,
+              "threats": [
+                {
+                  "id": "threat-s1",
+                  "title": "No session token after login",
+                  "status": "Open",
+                  "severity": "High",
+                  "type": "Spoofing",
+                  "description": "After authenticate_user() returns true, only a plain username string is stored in self.current_user. There is no session token or cryptographic proof of identity. Any part of the application could overwrite this value without re-authentication.",
+                  "mitigation": "Implement a session token (e.g. a UUID generated on login) stored alongside the username that must be validated before any authenticated action is performed."
+                },
+                {
+                  "id": "threat-i1",
+                  "title": "MD5 password hashing with no salt",
+                  "status": "Open",
+                  "severity": "High",
+                  "type": "Information Disclosure",
+                  "description": "_hash_password() uses hashlib.md5 with no salt. MD5 is cryptographically broken for password storage and identical passwords produce identical hashes, making rainbow table and brute-force attacks trivial.",
+                  "mitigation": "Replace MD5 with bcrypt, scrypt, or argon2 via the passlib library. Apply a unique per-user salt. Re-hash existing passwords on next successful login."
+                },
+                {
+                  "id": "threat-d1",
+                  "title": "No rate limiting on login attempts",
+                  "status": "Open",
+                  "severity": "High",
+                  "type": "Denial of Service",
+                  "description": "There is no lockout, delay, or failed-attempt counter in authenticate_user() or show_login(). An attacker can brute-force any account by repeatedly calling the login dialog with no consequence.",
+                  "mitigation": "Add a failed attempt counter per username stored in the database. Lock the account or impose an exponentially increasing delay after 5 consecutive failures."
+                },
+                {
+                  "id": "threat-d2",
+                  "title": "No input length validation on username or password",
+                  "status": "Open",
+                  "severity": "Low",
+                  "type": "Denial of Service",
+                  "description": "No maximum length is enforced on either the username or password fields in show_create_account(). Excessively long strings could degrade application performance or cause unexpected SQLite behaviour.",
+                  "mitigation": "Enforce a maximum length of 64 characters on both fields before any database operation is performed."
+                }
+              ]
+            }
+          },
+          {
+            "type": "tm.Process",
+            "size": { "width": 150, "height": 100 },
+            "position": { "x": 220, "y": 270 },
+            "angle": 0,
+            "id": "proc-gamesetup",
+            "z": 2,
+            "hasOpenThreats": true,
+            "attrs": {},
+            "data": {
+              "name": "Game setup (show_opponent_dialog, play_game)",
+              "description": "Prompts Player 1 to enter the opponent username and password, authenticates the opponent via authenticate_user(), initialises a fresh board state, and transitions to the playing state.",
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": true,
+              "threats": [
+                {
+                  "id": "threat-s2",
+                  "title": "Opponent credentials entered by Player 1",
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Spoofing",
+                  "description": "show_opponent_dialog() asks Player 1 to type the opponent's password on their behalf. There is no mechanism to verify the correct person is physically present, enabling Player 1 to impersonate any user whose password they know.",
+                  "mitigation": "Display a clear screen-handover prompt requiring Player 2 to enter their own credentials directly, or implement a separate authentication dialog flow for the second player."
+                }
+              ]
+            }
+          },
+          {
+            "type": "tm.Process",
+            "size": { "width": 150, "height": 100 },
+            "position": { "x": 220, "y": 445 },
+            "angle": 0,
+            "id": "proc-gamelogic",
+            "z": 2,
+            "hasOpenThreats": true,
+            "attrs": {},
+            "data": {
+              "name": "Game logic (on_button_click, make_move, is_winner, is_board_full, switch_player)",
+              "description": "Processes board button clicks, validates moves against self.board, checks win and draw conditions using winning_combos, switches the active player, and updates the GUI display.",
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": true,
+              "threats": [
+                {
+                  "id": "threat-r2",
+                  "title": "No mid-game persistence of move history",
+                  "status": "Open",
+                  "severity": "Low",
+                  "type": "Repudiation",
+                  "description": "Moves are held only in self.board in memory during play. If the application is closed mid-game, no record of the moves made exists. Players could dispute the board state with no evidence available.",
+                  "mitigation": "Write each move to the database or an append-only log file as it is made, not only when the game concludes via end_game()."
+                }
+              ]
+            }
+          },
+          {
+            "type": "tm.Process",
+            "size": { "width": 150, "height": 100 },
+            "position": { "x": 440, "y": 445 },
+            "angle": 0,
+            "id": "proc-saveload",
+            "z": 2,
+            "hasOpenThreats": true,
+            "attrs": {},
+            "data": {
+              "name": "Save / load (save_game, load_game)",
+              "description": "save_game() serialises the current board state, player names, current player, and timestamp to a UUID-named JSON file. load_game() deserialises a JSON file by game ID and restores game state with no ownership verification.",
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": true,
+              "threats": [
+                {
+                  "id": "threat-e1",
+                  "title": "Any authenticated user can load any saved game",
+                  "status": "Open",
+                  "severity": "High",
+                  "type": "Elevation of Privilege",
+                  "description": "load_game() accepts a game ID and loads the file with no check that self.current_user matches player_x or player_o in the save file. Any logged-in user can take over another player's in-progress game by knowing or guessing the UUID filename.",
+                  "mitigation": "After loading the JSON, verify that self.current_user equals save_data['player_x'] or save_data['player_o'] before restoring state. Display an error and reject the load if the check fails."
+                },
+                {
+                  "id": "threat-t1",
+                  "title": "Save files have no integrity protection",
+                  "status": "Open",
+                  "severity": "High",
+                  "type": "Tampering",
+                  "description": "JSON save files are written with json.dump() and read back with json.load() with no checksum, HMAC, or digital signature. Anyone with file system access can modify the board state, swap player names, or change the current_player value before the file is loaded.",
+                  "mitigation": "Compute an HMAC-SHA256 of the serialised JSON using an application secret key and store it inside the save file. Verify the HMAC on load and reject files that fail validation."
+                }
+              ]
+            }
+          },
+          {
+            "type": "tm.Process",
+            "size": { "width": 150, "height": 100 },
+            "position": { "x": 440, "y": 270 },
+            "angle": 0,
+            "id": "proc-endgame",
+            "z": 2,
+            "hasOpenThreats": true,
+            "attrs": {},
+            "data": {
+              "name": "End game (end_game)",
+              "description": "Records the game result and winner to the games table and updates the win/loss statistics for both players in the users table via SQL UPDATE.",
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": true,
+              "threats": [
+                {
+                  "id": "threat-r1",
+                  "title": "No audit logging of authentication or game events",
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Repudiation",
+                  "description": "The application performs no logging of login attempts, authentication failures, moves made, or game outcomes beyond the single database row written by end_game(). If this row is tampered with or the game is abandoned, no audit trail exists to verify what occurred.",
+                  "mitigation": "Introduce Python's logging module with INFO-level entries for: login success/failure, game start, each move with timestamp, game end, and save/load operations. Write to a timestamped append-only log file."
+                }
+              ]
+            }
+          },
+          {
+            "type": "tm.Process",
+            "size": { "width": 150, "height": 100 },
+            "position": { "x": 220, "y": 615 },
+            "angle": 0,
+            "id": "proc-scoreboard",
+            "z": 2,
+            "hasOpenThreats": true,
+            "attrs": {},
+            "data": {
+              "name": "Scoreboard (show_scoreboard, get_scoreboard)",
+              "description": "Queries all usernames, wins, and losses from the users table ordered by wins descending and displays them in the GUI. Accessible from the main menu without any prior authentication.",
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": true,
+              "threats": [
+                {
+                  "id": "threat-e2",
+                  "title": "Scoreboard accessible without authentication",
+                  "status": "Open",
+                  "severity": "Low",
+                  "type": "Elevation of Privilege",
+                  "description": "show_scoreboard() is called from show_main_menu() before any login is performed. All registered usernames are exposed to any person who opens the application, potentially assisting targeted credential attacks.",
+                  "mitigation": "Move the scoreboard button to the post-login menu (show_login_menu), or at minimum avoid displaying usernames to unauthenticated users."
+                },
+                {
+                  "id": "threat-i3",
+                  "title": "All usernames exposed without authentication",
+                  "status": "Open",
+                  "severity": "Low",
+                  "type": "Information Disclosure",
+                  "description": "get_scoreboard() returns all registered usernames via SELECT username, wins, losses FROM users with no access control check. This provides an attacker with a complete list of valid usernames to target.",
+                  "mitigation": "Restrict the scoreboard query to authenticated sessions only, or mask usernames for unauthenticated viewers."
+                }
+              ]
+            }
+          },
+          {
+            "type": "tm.Store",
+            "size": { "width": 160, "height": 80 },
+            "position": { "x": 660, "y": 220 },
+            "angle": 0,
+            "id": "store-db",
+            "z": 2,
+            "hasOpenThreats": true,
+            "attrs": {},
+            "data": {
+              "name": "tictactoe.db (SQLite)",
+              "description": "Local SQLite database file created by _init_db(). Stores users table (username, MD5 password hash, wins, losses) and games table (game ID, players, winner, timestamp).",
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "isEncrypted": false,
+              "isSigned": false,
+              "storesCredentials": true,
+              "storesPII": false,
+              "hasOpenThreats": true,
+              "threats": [
+                {
+                  "id": "threat-t2",
+                  "title": "Database file unprotected on disk",
+                  "status": "Open",
+                  "severity": "High",
+                  "type": "Tampering",
+                  "description": "tictactoe.db is created in the application working directory with no encryption, no restrictive file permissions, and no integrity checking. Any local user can open it with a SQLite browser tool and directly modify win records, password hashes, or delete records.",
+                  "mitigation": "Apply restrictive OS file permissions (chmod 600 on Unix). Consider SQLCipher for at-rest encryption. Validate database integrity on startup using SQLite's integrity_check pragma."
+                },
+                {
+                  "id": "threat-i2",
+                  "title": "Unsalted MD5 password hashes stored in plaintext database",
+                  "status": "Open",
+                  "severity": "High",
+                  "type": "Information Disclosure",
+                  "description": "The password_hash column stores unsalted MD5 digests. If the database file is accessed by any means, all user passwords can be recovered using freely available rainbow table tools such as hashcat within minutes.",
+                  "mitigation": "Migrate the password_hash column to store bcrypt or argon2 hashes with per-user salt. Force re-hashing of existing accounts on next successful login."
+                }
+              ]
+            }
+          },
+          {
+            "type": "tm.Store",
+            "size": { "width": 160, "height": 80 },
+            "position": { "x": 660, "y": 445 },
+            "angle": 0,
+            "id": "store-saves",
+            "z": 2,
+            "hasOpenThreats": true,
+            "attrs": {},
+            "data": {
+              "name": "savegames/<uuid>.json (File system)",
+              "description": "Plain JSON files written to the savegames/ directory by save_game(). Each file contains: game_id, board array, player_x, player_o, current_player, and timestamp.",
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "isEncrypted": false,
+              "isSigned": false,
+              "storesCredentials": false,
+              "storesPII": false,
+              "hasOpenThreats": true,
+              "threats": [
+                {
+                  "id": "threat-t3",
+                  "title": "JSON save files editable by any local user",
+                  "status": "Open",
+                  "severity": "High",
+                  "type": "Tampering",
+                  "description": "Save files are plain JSON with no checksum or signature. Any user with access to the savegames/ directory can open a file in a text editor and modify the board array, swap player_x/player_o, or change current_player before it is loaded.",
+                  "mitigation": "Compute an HMAC-SHA256 over the serialised JSON content and store it as a field in the file. Verify the HMAC inside load_game() before trusting any values from the file."
+                },
+                {
+                  "id": "threat-i4",
+                  "title": "Player usernames stored in plain text in save files",
+                  "status": "Open",
+                  "severity": "Low",
+                  "type": "Information Disclosure",
+                  "description": "Each save file includes player_x and player_o as plain text strings. Anyone with read access to the savegames/ directory can enumerate all username pairs who have played together without authenticating.",
+                  "mitigation": "Apply restrictive file permissions to the savegames/ directory. Consider storing only user IDs (integers from the database) rather than usernames in save files."
+                }
+              ]
+            }
+          },
+          {
+            "type": "tm.Flow",
+            "source": { "id": "actor-p1" },
+            "target": { "id": "proc-auth" },
+            "id": "flow-p1-auth",
+            "z": 3,
+            "hasOpenThreats": true,
+            "attrs": { "line": { "strokeDasharray": null } },
+            "labels": [{ "attrs": { "label": { "text": "username + password (plain text)" } } }],
+            "data": {
+              "name": "username + password (plain text)",
+              "description": "Player 1 enters username and password via simpledialog.askstring(). The plain-text password string is passed to authenticate_user() and _hash_password().",
+              "outOfScope": false,
+              "isBidirectional": false,
+              "hasOpenThreats": true,
+              "threats": [
+                {
+                  "id": "threat-i5",
+                  "title": "Password passed as plain-text string through multiple functions",
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Information Disclosure",
+                  "description": "The password is retrieved from simpledialog and passed between show_login(), authenticate_user(), and _hash_password() as a plain Python string. It is not zeroed after the hash is computed and remains in memory until garbage collected, potentially accessible in a memory dump.",
+                  "mitigation": "Dereference the password variable as early as possible after hashing. In Python, full memory zeroing is not guaranteed, but reducing the lifetime of the plain-text string reduces the exposure window."
+                }
+              ]
+            }
+          },
+          {
+            "type": "tm.Flow",
+            "source": { "id": "actor-p1" },
+            "target": { "id": "proc-gamesetup" },
+            "id": "flow-p1-setup",
+            "z": 3,
+            "hasOpenThreats": false,
+            "attrs": { "line": { "strokeDasharray": null } },
+            "labels": [{ "attrs": { "label": { "text": "opponent username" } } }],
+            "data": {
+              "name": "opponent username",
+              "description": "Player 1 enters the opponent's username in the game setup dialog shown by show_opponent_dialog().",
+              "outOfScope": false,
+              "isBidirectional": false,
+              "hasOpenThreats": false,
+              "threats": []
+            }
+          },
+          {
+            "type": "tm.Flow",
+            "source": { "id": "actor-p2" },
+            "target": { "id": "proc-gamesetup" },
+            "id": "flow-p2-setup",
+            "z": 3,
+            "hasOpenThreats": true,
+            "attrs": { "line": { "strokeDasharray": null } },
+            "labels": [{ "attrs": { "label": { "text": "opponent password (typed by P1)" } } }],
+            "data": {
+              "name": "opponent password (typed by P1)",
+              "description": "Player 2's password is typed by Player 1 on their behalf in show_opponent_dialog(). Player 2's physical presence is not verified.",
+              "outOfScope": false,
+              "isBidirectional": false,
+              "hasOpenThreats": true,
+              "threats": [
+                {
+                  "id": "threat-s3",
+                  "title": "Player 1 can authenticate as Player 2 without their presence",
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Spoofing",
+                  "description": "show_opponent_dialog() asks Player 1 to enter the opponent's password. If Player 1 knows the password, they can impersonate any registered user as the second player without that user's knowledge or consent.",
+                  "mitigation": "Require Player 2 to enter their own credentials in a separate dialog that clearly indicates a screen handover, or implement a two-step authentication flow per player."
+                }
+              ]
+            }
+          },
+          {
+            "type": "tm.Flow",
+            "source": { "id": "proc-auth" },
+            "target": { "id": "store-db" },
+            "id": "flow-auth-db-write",
+            "z": 3,
+            "hasOpenThreats": false,
+            "attrs": { "line": { "strokeDasharray": null } },
+            "labels": [{ "attrs": { "label": { "text": "username + MD5 hash (write)" } } }],
+            "data": {
+              "name": "username + MD5 hash (write)",
+              "description": "create_account() executes INSERT INTO users (username, password_hash) writing the plain username and unsalted MD5 hash to the database.",
+              "outOfScope": false,
+              "isBidirectional": false,
+              "hasOpenThreats": false,
+              "threats": []
+            }
+          },
+          {
+            "type": "tm.Flow",
+            "source": { "id": "store-db" },
+            "target": { "id": "proc-auth" },
+            "id": "flow-db-auth-read",
+            "z": 3,
+            "hasOpenThreats": false,
+            "attrs": { "line": { "strokeDasharray": null } },
+            "labels": [{ "attrs": { "label": { "text": "auth result (username row)" } } }],
+            "data": {
+              "name": "auth result (username row)",
+              "description": "authenticate_user() executes SELECT username FROM users WHERE username=? AND password_hash=? and returns the result to determine login success.",
+              "outOfScope": false,
+              "isBidirectional": false,
+              "hasOpenThreats": false,
+              "threats": []
+            }
+          },
+          {
+            "type": "tm.Flow",
+            "source": { "id": "proc-auth" },
+            "target": { "id": "proc-gamesetup" },
+            "id": "flow-auth-setup",
+            "z": 3,
+            "hasOpenThreats": false,
+            "attrs": { "line": { "strokeDasharray": null } },
+            "labels": [{ "attrs": { "label": { "text": "auth success + username stored" } } }],
+            "data": {
+              "name": "auth success + username stored",
+              "description": "On successful login, self.current_user is set to the username and show_login_menu() is called, from which game setup can be initiated.",
+              "outOfScope": false,
+              "isBidirectional": false,
+              "hasOpenThreats": false,
+              "threats": []
+            }
+          },
+          {
+            "type": "tm.Flow",
+            "source": { "id": "proc-gamesetup" },
+            "target": { "id": "proc-gamelogic" },
+            "id": "flow-setup-logic",
+            "z": 3,
+            "hasOpenThreats": false,
+            "attrs": { "line": { "strokeDasharray": null } },
+            "labels": [{ "attrs": { "label": { "text": "board state + player assignments" } } }],
+            "data": {
+              "name": "board state + player assignments",
+              "description": "play_game() initialises self.board to 9 empty spaces, sets self.current_player to X, generates self.game_id, and calls display_game_board() to begin the interactive game.",
+              "outOfScope": false,
+              "isBidirectional": false,
+              "hasOpenThreats": false,
+              "threats": []
+            }
+          },
+          {
+            "type": "tm.Flow",
+            "source": { "id": "proc-gamelogic" },
+            "target": { "id": "proc-endgame" },
+            "id": "flow-logic-end",
+            "z": 3,
+            "hasOpenThreats": false,
+            "attrs": { "line": { "strokeDasharray": null } },
+            "labels": [{ "attrs": { "label": { "text": "winner username or None (draw)" } } }],
+            "data": {
+              "name": "winner username or None (draw)",
+              "description": "on_button_click() calls end_game(player) with the winner's username after is_winner() returns true, or end_game(None) after is_board_full() returns true for a draw.",
+              "outOfScope": false,
+              "isBidirectional": false,
+              "hasOpenThreats": false,
+              "threats": []
+            }
+          },
+          {
+            "type": "tm.Flow",
+            "source": { "id": "proc-endgame" },
+            "target": { "id": "store-db" },
+            "id": "flow-end-db",
+            "z": 3,
+            "hasOpenThreats": false,
+            "attrs": { "line": { "strokeDasharray": null } },
+            "labels": [{ "attrs": { "label": { "text": "game record + wins/losses update" } } }],
+            "data": {
+              "name": "game record + wins/losses update",
+              "description": "end_game() executes INSERT INTO games and UPDATE users SET wins/losses for both players.",
+              "outOfScope": false,
+              "isBidirectional": false,
+              "hasOpenThreats": false,
+              "threats": []
+            }
+          },
+          {
+            "type": "tm.Flow",
+            "source": { "id": "proc-gamelogic" },
+            "target": { "id": "proc-saveload" },
+            "id": "flow-logic-save",
+            "z": 3,
+            "hasOpenThreats": false,
+            "attrs": { "line": { "strokeDasharray": null } },
+            "labels": [{ "attrs": { "label": { "text": "board state + player info" } } }],
+            "data": {
+              "name": "board state + player info",
+              "description": "on_save_game() triggers save_game() which reads self.board, self.current_user, self.opponent, self.current_player, and self.game_id for serialisation.",
+              "outOfScope": false,
+              "isBidirectional": false,
+              "hasOpenThreats": false,
+              "threats": []
+            }
+          },
+          {
+            "type": "tm.Flow",
+            "source": { "id": "proc-saveload" },
+            "target": { "id": "store-saves" },
+            "id": "flow-save-fs",
+            "z": 3,
+            "hasOpenThreats": false,
+            "attrs": { "line": { "strokeDasharray": null } },
+            "labels": [{ "attrs": { "label": { "text": "JSON game state (write)" } } }],
+            "data": {
+              "name": "JSON game state (write)",
+              "description": "save_game() writes the serialised dict to savegames/<uuid>.json using json.dump() with indent=2. No integrity protection is applied.",
+              "outOfScope": false,
+              "isBidirectional": false,
+              "hasOpenThreats": false,
+              "threats": []
+            }
+          },
+          {
+            "type": "tm.Flow",
+            "source": { "id": "store-saves" },
+            "target": { "id": "proc-saveload" },
+            "id": "flow-fs-load",
+            "z": 3,
+            "hasOpenThreats": false,
+            "attrs": { "line": { "strokeDasharray": null } },
+            "labels": [{ "attrs": { "label": { "text": "JSON game state (read)" } } }],
+            "data": {
+              "name": "JSON game state (read)",
+              "description": "load_game() reads the file with json.load(). No integrity check or ownership validation is performed before the data is trusted and applied to application state.",
+              "outOfScope": false,
+              "isBidirectional": false,
+              "hasOpenThreats": false,
+              "threats": []
+            }
+          },
+          {
+            "type": "tm.Flow",
+            "source": { "id": "proc-saveload" },
+            "target": { "id": "proc-gamelogic" },
+            "id": "flow-load-logic",
+            "z": 3,
+            "hasOpenThreats": false,
+            "attrs": { "line": { "strokeDasharray": null } },
+            "labels": [{ "attrs": { "label": { "text": "restored board state + players" } } }],
+            "data": {
+              "name": "restored board state + players",
+              "description": "After loading, self.board, self.current_user, self.opponent, and self.current_player are overwritten with values from the file with no ownership verification performed.",
+              "outOfScope": false,
+              "isBidirectional": false,
+              "hasOpenThreats": false,
+              "threats": []
+            }
+          },
+          {
+            "type": "tm.Flow",
+            "source": { "id": "actor-p1" },
+            "target": { "id": "proc-scoreboard" },
+            "id": "flow-p1-score",
+            "z": 3,
+            "hasOpenThreats": false,
+            "attrs": { "line": { "strokeDasharray": null } },
+            "labels": [{ "attrs": { "label": { "text": "view request (no auth required)" } } }],
+            "data": {
+              "name": "view request (no auth required)",
+              "description": "The View Scoreboard button on the main menu calls show_scoreboard() before any login. Accessible to any person who opens the application.",
+              "outOfScope": false,
+              "isBidirectional": false,
+              "hasOpenThreats": false,
+              "threats": []
+            }
+          },
+          {
+            "type": "tm.Flow",
+            "source": { "id": "store-db" },
+            "target": { "id": "proc-scoreboard" },
+            "id": "flow-db-score",
+            "z": 3,
+            "hasOpenThreats": false,
+            "attrs": { "line": { "strokeDasharray": null } },
+            "labels": [{ "attrs": { "label": { "text": "username, wins, losses (all rows)" } } }],
+            "data": {
+              "name": "username, wins, losses (all rows)",
+              "description": "get_scoreboard() executes SELECT username, wins, losses FROM users ORDER BY wins DESC and returns all rows with no access control applied.",
+              "outOfScope": false,
+              "isBidirectional": false,
+              "hasOpenThreats": false,
+              "threats": []
+            }
+          }
+        ]
+      }
+    ]
+  }
 }
-        
-        data_str = json.dumps(save_data, sort_keys=True)
-        signature = hmac.new(self.app_secret, data_str.encode(), hashlib.sha256).hexdigest()
-        save_data['hmac'
-] = signature # Append HMAC
-        
-        filepath = os.path.join(self.savegame_folder, f"{self.game_id}.json")
-        with open(filepath, 'w') as f:
-            json.dump(save_data, f)
-        logging.info(f"Game saved: {self.game_id} by {self.current_user}")
-
-    def load_game(self, game_id): """Loads game with HMAC verification and ownership check (Threat E1, T1)."""
-        filepath = os.path.join(self.savegame_folder, f"{game_id}.json")
-        if not os.path.exists(filepath): return False
-        
-        with open(filepath, 'r') as f:
-            save_data = json.load(f)
-            
-        received_hmac = save_data.pop('hmac', None)
-        data_str = json.dumps(save_data, sort_keys=True)
-        expected_hmac = hmac.new(self.app_secret, data_str.encode(), hashlib.sha256).hexdigest()
-        
-        # Verify Integrity
-        if not received_hmac or not secrets.compare_digest(received_hmac, expected_hmac):
-            messagebox.showerror("Error",
-"Save file corrupted or tampered with!")
-            return False
-            
-        # Verify Ownership (Threat E1 mitigation)
-        if self.current_user not in [save_data['player_x'
-  ], save_data['player_o'
-  ]
-]:
-            messagebox.showerror("Denied",
-"You are not a player in this game.")
-            return False
-            
-        self.board = save_data['board'
-]
-        self.opponent = save_data['player_o'
-] if self.current_user == save_data['player_x'
-] else save_data['player_x'
-]
-        self.current_player = save_data['current_player'
-]
-        self.game_id = game_id
-        return True
-
-    def show_main_menu(self):
-        self.clear_frame()
-        self.current_user = None
-        self.session_token = None
-        
-        tk.Label(self.root, text="TicTacDoh", font=("Arial",
-24)).pack(pady=20)
-        tk.Button(self.root, text="Create Account", command=self.show_create_account).pack(pady=5)
-        tk.Button(self.root, text="Login", command=self.show_login).pack(pady=5)
-        # Scoreboard moved to prevent username exposure (Threat E2/I3)
-        tk.Button(self.root, text="Exit", command=self.root.quit).pack(pady=5)
-
-    def show_login(self):
-        username = simpledialog.askstring("Login",
-"Username:")
-        password = simpledialog.askstring("Login",
-"Password:", show='*')
-        
-        token = self.authenticate_user(username, password)
-        if token:
-            self.current_user = username
-            self.session_token = token
-            self.show_login_menu()
-        else:
-            messagebox.showerror("Error",
-"Invalid login.")
-
-    def show_opponent_dialog(self): """Forces physical handover for P2 credentials (Threat S2/S3 mitigation)."""
-        opp = simpledialog.askstring("Game Setup",
-"Enter Opponent Username:")
-        if not opp or opp == self.current_user: return
-        
-        messagebox.showinfo("Handover", f"Please hand the device to {opp} to authenticate.")
-        pwd = simpledialog.askstring("Security", f"{opp}, enter your password:", show='*')
-        
-        if self.authenticate_user(opp, pwd):
-            self.opponent = opp
-            self.play_game()
-        else:
-            messagebox.showerror("Error",
-"Opponent authentication failed.")
-
-    def show_login_menu(self):
-        self.clear_frame()
-        tk.Label(self.root, text=f"Welcome, {self.current_user}").pack(pady=20)
-        tk.Button(self.root, text="New Game", command=self.show_opponent_dialog).pack(pady=5)
-        tk.Button(self.root, text="Load Game", command=self.show_load_game_dialog).pack(pady=5)
-        tk.Button(self.root, text="View Scoreboard", command=self.show_scoreboard).pack(pady=5)
-        tk.Button(self.root, text="Logout", command=self.show_main_menu).pack(pady=5)
-
-    def clear_frame(self):
-        for w in self.root.winfo_children(): w.destroy()
-
-    def show_scoreboard(self):
-        # Existing logic, now protected by being inside login_menu
-        self.clear_frame()
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute('SELECT username, wins, losses FROM users ORDER BY wins DESC')
-        for user, w, l in cursor.fetchall():
-            tk.Label(self.root, text=f"{user}: {w}W - {l}L").pack()
-        conn.close()
-        tk.Button(self.root, text="Back", command=self.show_login_menu).pack(pady=10)
