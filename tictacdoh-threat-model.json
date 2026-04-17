@@ -1,0 +1,257 @@
+import os
+import json
+import sqlite3
+import hashlib
+import uuid
+import hmac
+import logging
+import secrets
+from datetime import datetime
+from enum import Enum
+import tkinter as tk
+from tkinter import messagebox, simpledialog
+
+# Setup basic logging for audit trails (Threat R1)
+logging.basicConfig(filename='tictacdoh.log', level=logging.INFO, 
+                    format='%(asctime)s - %(levelname)s - %(message)s')
+
+class GameState(Enum):
+    MENU = 1
+    LOGIN = 2
+    PLAYING = 3
+    GAME_OVER = 4
+
+class TicTacToe:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("TicTacDoh - Secure Edition")
+        self.root.geometry("400x500")
+        
+        self.db_path = "tictactoe.db"
+        self.savegame_folder = "savegames"
+        self.app_secret = b'7f3b89e2c1d5a4b6e8f9c0d1a2b3c4d5' # In production, load from env var
+        
+        self.current_user = None
+        self.session_token = None # Threat S1 mitigation
+        self.opponent = None
+        self.board = [' '
+] * 9
+        self.current_player = 'X'
+        self.game_state = GameState.MENU
+        self.game_id = None
+        self.buttons = []
+        
+        self._init_db()
+        self._init_savegame_folder()
+        self.show_main_menu()
+
+    def _init_db(self):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        # Added salt and failed_attempts columns (Threat I1, D1)
+        cursor.execute('''CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            salt TEXT NOT NULL,
+            failed_attempts INTEGER DEFAULT 0,
+            wins INTEGER DEFAULT 0,
+            losses INTEGER DEFAULT 0
+        )''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS games (
+            id TEXT PRIMARY KEY,
+            player_x TEXT NOT NULL,
+            player_o TEXT NOT NULL,
+            winner TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.commit()
+        conn.close()
+
+    def _hash_password(self, password, salt=None): """Secure PBKDF2 hashing with salt (Threat I1 mitigation)."""
+        if salt is None:
+            salt = secrets.token_hex(16)
+        # 100,
+000 iterations of SHA256 is the standard minimum
+        pwd_hash = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(),
+100000)
+        return pwd_hash.hex(), salt
+
+    def create_account(self, username, password):
+        # Input length validation (Threat D2)
+        if not (3 <= len(username) <= 20) or not (8 <= len(password) <= 64):
+            messagebox.showerror("Error",
+"Username (3-20) or Password (8-64) invalid length.")
+            return False
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        try:
+            pwd_hash, salt = self._hash_password(password)
+            cursor.execute('INSERT INTO users (username, password_hash, salt) VALUES (?, ?, ?)',
+                         (username, pwd_hash, salt))
+            conn.commit()
+            logging.info(f"Account created: {username}")
+            messagebox.showinfo("Success", f"Account '{username}' created!")
+            return True
+        except sqlite3.IntegrityError:
+            messagebox.showerror("Error",
+"Username exists.")
+            return False
+        finally:
+            conn.close()
+
+    def authenticate_user(self, username, password): """Authenticates with rate limiting and session tokens (Threat D1, S1)."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT password_hash, salt, failed_attempts FROM users WHERE username = ?', (username,))
+        row = cursor.fetchone()
+        
+        if not row:
+            conn.close()
+            return None
+
+        stored_hash, salt, failed = row
+        
+        if failed >= 5: # Lockout after 5 attempts
+            messagebox.showerror("Locked",
+"Too many failed attempts.")
+            conn.close()
+            return None
+
+        new_hash, _ = self._hash_password(password, salt)
+        
+        if secrets.compare_digest(stored_hash, new_hash): # Constant-time comparison
+            cursor.execute('UPDATE users SET failed_attempts = 0 WHERE username = ?', (username,))
+            conn.commit()
+            conn.close()
+            logging.info(f"Login success: {username}")
+            return str(uuid.uuid4()) # Return session token
+        else:
+            cursor.execute('UPDATE users SET failed_attempts = failed_attempts + 1 WHERE username = ?', (username,))
+            conn.commit()
+            conn.close()
+            logging.warning(f"Login failed: {username}")
+            return None
+
+    def save_game(self): """Saves game with HMAC integrity protection (Threat T1/T3 mitigation)."""
+        self.game_id = self.game_id or str(uuid.uuid4())
+        save_data = {
+            'game_id': self.game_id,
+            'board': self.board,
+            'player_x': self.current_user,
+            'player_o': self.opponent,
+            'current_player': self.current_player
+}
+        
+        data_str = json.dumps(save_data, sort_keys=True)
+        signature = hmac.new(self.app_secret, data_str.encode(), hashlib.sha256).hexdigest()
+        save_data['hmac'
+] = signature # Append HMAC
+        
+        filepath = os.path.join(self.savegame_folder, f"{self.game_id}.json")
+        with open(filepath, 'w') as f:
+            json.dump(save_data, f)
+        logging.info(f"Game saved: {self.game_id} by {self.current_user}")
+
+    def load_game(self, game_id): """Loads game with HMAC verification and ownership check (Threat E1, T1)."""
+        filepath = os.path.join(self.savegame_folder, f"{game_id}.json")
+        if not os.path.exists(filepath): return False
+        
+        with open(filepath, 'r') as f:
+            save_data = json.load(f)
+            
+        received_hmac = save_data.pop('hmac', None)
+        data_str = json.dumps(save_data, sort_keys=True)
+        expected_hmac = hmac.new(self.app_secret, data_str.encode(), hashlib.sha256).hexdigest()
+        
+        # Verify Integrity
+        if not received_hmac or not secrets.compare_digest(received_hmac, expected_hmac):
+            messagebox.showerror("Error",
+"Save file corrupted or tampered with!")
+            return False
+            
+        # Verify Ownership (Threat E1 mitigation)
+        if self.current_user not in [save_data['player_x'
+  ], save_data['player_o'
+  ]
+]:
+            messagebox.showerror("Denied",
+"You are not a player in this game.")
+            return False
+            
+        self.board = save_data['board'
+]
+        self.opponent = save_data['player_o'
+] if self.current_user == save_data['player_x'
+] else save_data['player_x'
+]
+        self.current_player = save_data['current_player'
+]
+        self.game_id = game_id
+        return True
+
+    def show_main_menu(self):
+        self.clear_frame()
+        self.current_user = None
+        self.session_token = None
+        
+        tk.Label(self.root, text="TicTacDoh", font=("Arial",
+24)).pack(pady=20)
+        tk.Button(self.root, text="Create Account", command=self.show_create_account).pack(pady=5)
+        tk.Button(self.root, text="Login", command=self.show_login).pack(pady=5)
+        # Scoreboard moved to prevent username exposure (Threat E2/I3)
+        tk.Button(self.root, text="Exit", command=self.root.quit).pack(pady=5)
+
+    def show_login(self):
+        username = simpledialog.askstring("Login",
+"Username:")
+        password = simpledialog.askstring("Login",
+"Password:", show='*')
+        
+        token = self.authenticate_user(username, password)
+        if token:
+            self.current_user = username
+            self.session_token = token
+            self.show_login_menu()
+        else:
+            messagebox.showerror("Error",
+"Invalid login.")
+
+    def show_opponent_dialog(self): """Forces physical handover for P2 credentials (Threat S2/S3 mitigation)."""
+        opp = simpledialog.askstring("Game Setup",
+"Enter Opponent Username:")
+        if not opp or opp == self.current_user: return
+        
+        messagebox.showinfo("Handover", f"Please hand the device to {opp} to authenticate.")
+        pwd = simpledialog.askstring("Security", f"{opp}, enter your password:", show='*')
+        
+        if self.authenticate_user(opp, pwd):
+            self.opponent = opp
+            self.play_game()
+        else:
+            messagebox.showerror("Error",
+"Opponent authentication failed.")
+
+    def show_login_menu(self):
+        self.clear_frame()
+        tk.Label(self.root, text=f"Welcome, {self.current_user}").pack(pady=20)
+        tk.Button(self.root, text="New Game", command=self.show_opponent_dialog).pack(pady=5)
+        tk.Button(self.root, text="Load Game", command=self.show_load_game_dialog).pack(pady=5)
+        tk.Button(self.root, text="View Scoreboard", command=self.show_scoreboard).pack(pady=5)
+        tk.Button(self.root, text="Logout", command=self.show_main_menu).pack(pady=5)
+
+    def clear_frame(self):
+        for w in self.root.winfo_children(): w.destroy()
+
+    def show_scoreboard(self):
+        # Existing logic, now protected by being inside login_menu
+        self.clear_frame()
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT username, wins, losses FROM users ORDER BY wins DESC')
+        for user, w, l in cursor.fetchall():
+            tk.Label(self.root, text=f"{user}: {w}W - {l}L").pack()
+        conn.close()
+        tk.Button(self.root, text="Back", command=self.show_login_menu).pack(pady=10)
